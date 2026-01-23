@@ -35,7 +35,7 @@ float SideSign(const MotorInfo& info) {
 
 void CaptureHome(std::vector<MotorInfo>& tripod,
                  float kp_hold = 0.0f,
-                 float kd_hold = 0.0f,
+                 float kd_hold = 0.5f,
                 std::chrono::milliseconds hold_time = std::chrono::milliseconds(300)) {
 
     const auto period = std::chrono::milliseconds(10);
@@ -132,7 +132,7 @@ void PrimeFeedback(const std::vector<CubemarsPi3Hat*>& motors) {
     for (int k = 0; k < 5; ++k) {
         for (auto* motor : motors) {
             float p = motor->getPosition();
-            motor->sendCommandMITMode(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            motor->sendCommandMITMode(p, 0.0f, 0.0f, 0.0f, 0.0f);
         }
         std::this_thread::sleep_for(period);
     }
@@ -204,13 +204,14 @@ int main(int argc, char** argv) {
     ////////// Enter MIT mode for each motor with delay to allow initialization //////////
     for (auto* motor : all_motors) {
         motor->enterMITMode();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
     // Immediately send "limp" commands to all motors for ~100ms
     for (int k = 0; k < 10; ++k) {  // 10 * 10ms = 100ms
         for (auto* motor : all_motors) {
-            motor->sendCommandMITMode(0.0f, 0.0f, 0.0f, 0.0f, 0.0f); // no pull, no damping, no torque
+            float p = motor->getPosition();
+            motor->sendCommandMITMode(p, 0.0f, 0.0f, 0.0f, 0.0f); // no pull, no damping, no torque
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }

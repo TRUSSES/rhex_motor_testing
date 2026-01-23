@@ -10,9 +10,6 @@
 #include <csignal>
 #include <atomic>
 
-
-// Motors are zero'd correctly --> Moves motors to stand pose and holds it until interrupted by Ctrl-C 
-
 namespace {
 
 // Motor side info for direction control
@@ -132,7 +129,7 @@ void PrimeFeedback(const std::vector<CubemarsPi3Hat*>& motors) {
     for (int k = 0; k < 5; ++k) {
         for (auto* motor : motors) {
             float p = motor->getPosition();
-            motor->sendCommandMITMode(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+            motor->sendCommandMITMode(p, 0.0f, 0.0f, 0.0f, 0.0f);
         }
         std::this_thread::sleep_for(period);
     }
@@ -201,18 +198,10 @@ int main(int argc, char** argv) {
     std::vector<CubemarsPi3Hat*> all_motors = {&motor_10, &motor_11, &motor_12,
                                                 &motor_13, &motor_14, &motor_15};
 
-    ////////// Enter MIT mode for each motor with delay to allow initialization //////////
+    // Enter MIT mode for each motor with delay to allow initialization
     for (auto* motor : all_motors) {
         motor->enterMITMode();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    // Immediately send "limp" commands to all motors for ~100ms
-    for (int k = 0; k < 10; ++k) {  // 10 * 10ms = 100ms
-        for (auto* motor : all_motors) {
-            motor->sendCommandMITMode(0.0f, 0.0f, 0.0f, 0.0f, 0.0f); // no pull, no damping, no torque
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
     std::signal(SIGINT, HandleSigInt);

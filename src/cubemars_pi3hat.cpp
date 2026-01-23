@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 CubemarsPi3Hat::CubemarsPi3Hat(int motor_id, int can_bus, mjbots::pi3hat::Pi3Hat* pi3hat)
     : motor_id_(motor_id), can_bus_(can_bus), pi3hat_(pi3hat)
@@ -10,10 +11,21 @@ CubemarsPi3Hat::CubemarsPi3Hat(int motor_id, int can_bus, mjbots::pi3hat::Pi3Hat
     rx_can_.resize(5);
 }
 
+// int CubemarsPi3Hat::float_to_uint(float x, float x_min, float x_max, int bits) {
+//     float span = x_max - x_min;
+//     x = std::clamp(x, x_min, x_max);
+//     return static_cast<int>((x - x_min) * ((1 << bits) / span));
+// }
+
+// cubemars_pi3hat.cpp
 int CubemarsPi3Hat::float_to_uint(float x, float x_min, float x_max, int bits) {
-    float span = x_max - x_min;
     x = std::clamp(x, x_min, x_max);
-    return static_cast<int>((x - x_min) * ((1 << bits) / span));
+    const float span = x_max - x_min;
+    const int max_int = (1 << bits) - 1;
+    const float scale = (float)max_int / span;
+    int u = (int)std::lround((x - x_min) * scale);
+    u = std::clamp(u, 0, max_int);
+    return u;
 }
 
 float CubemarsPi3Hat::uint_to_float(int x_int, float x_min, float x_max, int bits) {

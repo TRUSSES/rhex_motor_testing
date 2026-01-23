@@ -13,20 +13,40 @@ struct MotorInfo {
     CubemarsPi3Hat* motor;
     bool is_left_side;  // true = left side (positive velocity, CCW), false = right side (negative velocity, CW)
     float home_pos = 0.0f;  // Home position in radians
+    float return_target = 0.0f;
 };
+
+    static inline float WrapToPi(float a) {
+    a = std::fmod(a + (float)M_PI, 2.0f*(float)M_PI);
+    if (a < 0) a += 2.0f*(float)M_PI;
+    return a - (float)M_PI;
+    }
 
 
 void CaptureHome(std::vector<MotorInfo>& tripod,
-                 float kp_hold = 0.0f,
+                 float kp_hold = 0.8f,
                  float kd_hold = 0.5f,
                 std::chrono::milliseconds hold_time = std::chrono::milliseconds(300)) {
 
-    for (auto& info : tripod) {
-        info.home_pos = info.motor->getPosition();
-        std::cout << "ID " << info.id << " Initial read position: " << info.home_pos << " rad" << std::endl;
+    const auto period = std::chrono::milliseconds(10);
+
+    // 1) Prime feedback: send a few "do nothing" frames so getPosition() is fresh.
+    for (int k = 0; k < 5; ++k) {  // ~50ms
+        for (auto& info : tripod) {
+        float p = info.motor->getPosition();                 // whatever is currently cached
+        info.motor->sendCommandMITMode(p, 0.0f, 0.0f, kd_hold, 0.0f); // kp=0 => no pull
+        }
+        std::this_thread::sleep_for(period);
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Read absolute poistions ONCE as a hold target
+    for (auto& info: tripod) {
+        float p_abs = info.motor->getPosition();
+        info.return_target = p_abs;
+
+        std::cout << "ID " << info.id << " init_pos: " << 
+        p_abs << " (init_wrap " << WrapToPi(p_abs) << ")\n";
+    }
 
     // hold current position for a short time to capture home
     auto start = std::chrono::steady_clock::now();
@@ -34,15 +54,16 @@ void CaptureHome(std::vector<MotorInfo>& tripod,
         for (auto& info : tripod) {
             // Hold at whatever it currently is by using v_des=0 and a small damping.
             // We still set home_pos=0 byt with kp=0 so it won't pull to zero.
-            info.motor->sendCommandMITMode(info.home_pos, 0.0f, kp_hold, kd_hold, 0.0f);
+            info.motor->sendCommandMITMode(info.return_target, 0.0f, kp_hold, kd_hold, 0.0f);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     // Now read absolute positions as home
     for (auto& info : tripod) {
-        float pos = info.motor->getPosition();
-        info.home_pos = pos;
-        std::cout << "ID " << info.id << " Captured home position: " << pos << " rad" << std::endl;
+        float p_abs = info.motor->getPosition();
+        info.home_pos = WrapToPi(p_abs);
+        std::cout << "ID " << info.id << " home_position_abs: " << 
+        p_abs << "(home_wrap " << WrapToPi(p_abs) << ")\n";
     }
 }
 
@@ -131,6 +152,29 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
+    // std::cout << "Testing feedback for IDs 10 and 15...\n";
+
+    // // command tiny velocity briefly
+    // for (int k = 0; k < 20; k++) { // 200ms at 10ms
+    // motor_10.sendCommandMITMode(0.0f, 0.5f, 0.0f, 0.3f, 0.0f);
+    // motor_15.sendCommandMITMode(0.0f, 0.5f, 0.0f, 0.3f, 0.0f);
+    // std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // }
+
+    // // stop
+    // for (int k = 0; k < 20; k++) {
+    // motor_10.sendCommandMITMode(0.0f, 0.0f, 0.0f, 0.3f, 0.0f);
+    // motor_15.sendCommandMITMode(0.0f, 0.0f, 0.0f, 0.3f, 0.0f);
+    // std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // }
+
+    // // read
+    // std::cout << "p10=" << motor_10.getPosition()
+    //         << " (wrap " << WrapToPi(motor_10.getPosition()) << ")\n";
+    // std::cout << "p15=" << motor_15.getPosition()
+    //         << " (wrap " << WrapToPi(motor_15.getPosition()) << ")\n";
+
+
     // Zero all motor encoders at startup
 
     // std::cout << "Zeroing motor encoders..." << std::endl;
@@ -150,41 +194,119 @@ int main(int argc, char** argv) {
 
     const float kp = 0.0f;
     const float kd = 0.8;
-    const float kp_position = 0.8f;  // For position control when returning to zero
+    const float kp_position = 0.2f;  // For position control when returning to zero
     const float velocity = 3.0f;  // [rad/s]
 
     const auto return_duration = std::chrono::seconds(5);
     const auto period = std::chrono::milliseconds(10);
 
-    // Run left tripod
+
+    ////// TRIPOD WALKING SEQUENCE //////
+
+
+    // Run left tripod //
+
     std::cout << "Left tripod forward (5s)..." << std::endl;
     RunTripod(left_tripod, right_tripod, velocity, std::chrono::seconds(5), kp, kd);
 
     // Return left tripod to zero
     std::cout << "Returning left tripod to zero..." << std::endl;
+
+    // // Break first, strong damping no position pull
+    // const auto left_brake_time = std::chrono::milliseconds(500);
+    // auto tb_L = std::chrono::steady_clock::now();
+    // while (std::chrono::steady_clock::now() - tb_L < left_brake_time)
+    // {
+    //     for (auto& info : left_tripod) {
+    //         float p = info.motor->getPosition();
+    //         info.motor->sendCommandMITMode(p, 0.0f, 0.0f, 1.2f, 0.0f);
+    //     }
+    //     StopTripod(right_tripod, kd);
+    //     std::this_thread::sleep_for(period);
+    // }
+
+    // Compute fixed return targets based on nearest wrap-around ONCE
+
+    for (auto& info : left_tripod) {
+        float p0 = info.motor->getPosition();
+        float p0w = WrapToPi(p0);
+
+        // desired shortest wrapped target to home
+        float err = WrapToPi(info.home_pos - p0w);
+
+        // command in the same coordinate as p0
+        info.return_target = p0 + err;
+        
+        
+
+        std::cout << "ID " << info.id
+                << " p0=" << p0 << " (wrap " << WrapToPi(p0) << ")"
+                << " home=" << info.home_pos << " (wrap " << WrapToPi(info.home_pos) << ")"
+                << " target=" << info.return_target << " (wrap " << WrapToPi(info.return_target) << ")\n";
+        }
+    
     auto start = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - start < return_duration) {
         for (auto& info : left_tripod) {
-            info.motor->sendCommandMITMode(info.home_pos, 0.0f, kp_position, kd, 0.0f);
+            // Moves legs to nearest equivalent position to home
+            info.motor->sendCommandMITMode(info.return_target, 0.0f, kp_position, kd, 0.0f);
         }
         StopTripod(right_tripod, kd);
         std::this_thread::sleep_for(period);
     }
 
-    // Run right tripod
+    /////////// RUN RIGHT TRIPOD /////////////
+
     std::cout << "Right tripod forward (5s)..." << std::endl;
     RunTripod(right_tripod, left_tripod, velocity, std::chrono::seconds(5), kp, kd);
 
     // Return right tripod to zero
     std::cout << "Returning right tripod to zero..." << std::endl;
+
+    // // Break first, strong damping no position pull
+    // const auto right_brake_time = std::chrono::milliseconds(500);
+    // auto tb_R = std::chrono::steady_clock::now();
+    // while (std::chrono::steady_clock::now() - tb_R < right_brake_time)
+    // {
+    //     for (auto& info : right_tripod) {
+    //         float p = info.motor->getPosition();
+    //         info.motor->sendCommandMITMode(p, 0.0f, 0.0f, 1.2f, 0.0f);
+    //     }
+    //     StopTripod(left_tripod, kd);
+    //     std::this_thread::sleep_for(period);
+    // }
+
+    // Compute fixed return targets based on nearest wrap-around ONCE
+
+    for (auto& info : right_tripod) {
+        float p0 = info.motor->getPosition();
+        float p0w = WrapToPi(p0);
+
+        // desired shortest wrapped target to home
+        float err = WrapToPi(info.home_pos - p0w);
+
+        // command in the same coordinate as p0
+        info.return_target = p0 + err;
+        
+
+        std::cout << "ID " << info.id
+                << " p0=" << p0 << " (wrap " << WrapToPi(p0) << ")"
+                << " home=" << info.home_pos << " (wrap " << WrapToPi(info.home_pos) << ")"
+                << " target=" << info.return_target << " (wrap " << WrapToPi(info.return_target) << ")\n";
+        }
+    
     start = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - start < return_duration) {
         for (auto& info : right_tripod) {
-            info.motor->sendCommandMITMode(info.home_pos, 0.0f, kp_position, kd, 0.0f);
+            // Moves legs to nearest equivalent position to home
+            info.motor->sendCommandMITMode(info.return_target, 0.0f, kp_position, kd, 0.0f);
+
         }
         StopTripod(left_tripod, kd);
         std::this_thread::sleep_for(period);
     }
+
+    /// EXIT SEQUENCE ///
 
     for (auto* motor : all_motors) {
         motor->exitMITMode();
@@ -192,4 +314,3 @@ int main(int argc, char** argv) {
 
     return 0;
 }
-    
