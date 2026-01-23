@@ -4,14 +4,47 @@
 #include <iostream>
 #include <thread>
 #include <vector>
-
+#include <cmath>
 namespace {
 
 // Motor side info for direction control
 struct MotorInfo {
+    int id;
     CubemarsPi3Hat* motor;
     bool is_left_side;  // true = left side (positive velocity, CCW), false = right side (negative velocity, CW)
+    float home_pos = 0.0f;  // Home position in radians
 };
+
+
+void CaptureHome(std::vector<MotorInfo>& tripod,
+                 float kp_hold = 0.0f,
+                 float kd_hold = 0.5f,
+                std::chrono::milliseconds hold_time = std::chrono::milliseconds(300)) {
+
+    for (auto& info : tripod) {
+        info.home_pos = info.motor->getPosition();
+        std::cout << "ID " << info.id << " Initial read position: " << info.home_pos << " rad" << std::endl;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    // hold current position for a short time to capture home
+    auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < hold_time) {
+        for (auto& info : tripod) {
+            // Hold at whatever it currently is by using v_des=0 and a small damping.
+            // We still set home_pos=0 byt with kp=0 so it won't pull to zero.
+            info.motor->sendCommandMITMode(info.home_pos, 0.0f, kp_hold, kd_hold, 0.0f);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // Now read absolute positions as home
+    for (auto& info : tripod) {
+        float pos = info.motor->getPosition();
+        info.home_pos = pos;
+        std::cout << "ID " << info.id << " Captured home position: " << pos << " rad" << std::endl;
+    }
+}
 
 // Stop all motors in a tripod
 void StopTripod(std::vector<MotorInfo>& tripod, float kd) {
@@ -78,14 +111,14 @@ int main(int argc, char** argv) {
     // Left tripod: 13 (left), 10 (left), 11 (right)
     // Right tripod: 12 (right), 15 (right), 14 (left)
     std::vector<MotorInfo> left_tripod = {
-        {&motor_13, true},   // left side
-        {&motor_10, true},   // left side
-        {&motor_11, false}   // right side
+        {13, &motor_13, true},   // left side
+        {10, &motor_10, true},   // left side
+        {11, &motor_11, false}   // right side
     };
     std::vector<MotorInfo> right_tripod = {
-        {&motor_12, false},  // right side
-        {&motor_15, false},  // right side
-        {&motor_14, true}    // left side
+        {12, &motor_12, false},  // right side
+        {15, &motor_15, false},  // right side
+        {14, &motor_14, true}    // left side
     };
 
     // All motors for init/exit
@@ -95,22 +128,32 @@ int main(int argc, char** argv) {
     // Enter MIT mode for each motor with delay to allow initialization
     for (auto* motor : all_motors) {
         motor->enterMITMode();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
     // Zero all motor encoders at startup
-    std::cout << "Zeroing motor encoders..." << std::endl;
-    for (auto* motor : all_motors) {
-        motor->zeroMotor();
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+
+    // std::cout << "Zeroing motor encoders..." << std::endl;
+    // for (auto* motor : all_motors) {
+    //     motor->zeroMotor();
+    //     motor->sendCommandMITMode(0.0f, 0.0f, 3.0f, 0.3f, 0.0f);
+    //     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    // }
+    //     std::cout << "Motors have been zero'd.." << std::endl;
+
+    std::cout << "Capturing home positions..." << std::endl;
+    CaptureHome(left_tripod);
+    CaptureHome(right_tripod);
+    std::cout << "Home captured." << std::endl;
+
+
 
     const float kp = 0.0f;
     const float kd = 0.8;
-    const float kp_position = 0.3f;  // For position control when returning to zero
+    const float kp_position = 0.8f;  // For position control when returning to zero
     const float velocity = 3.0f;  // [rad/s]
 
-    const auto return_duration = std::chrono::seconds(3);
+    const auto return_duration = std::chrono::seconds(5);
     const auto period = std::chrono::milliseconds(10);
 
     // Run left tripod
@@ -122,7 +165,7 @@ int main(int argc, char** argv) {
     auto start = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - start < return_duration) {
         for (auto& info : left_tripod) {
-            info.motor->sendCommandMITMode(0.0f, 0.0f, kp_position, kd, 0.0f);
+            info.motor->sendCommandMITMode(info.home_pos, 0.0f, kp_position, kd, 0.0f);
         }
         StopTripod(right_tripod, kd);
         std::this_thread::sleep_for(period);
@@ -137,7 +180,7 @@ int main(int argc, char** argv) {
     start = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - start < return_duration) {
         for (auto& info : right_tripod) {
-            info.motor->sendCommandMITMode(0.0f, 0.0f, kp_position, kd, 0.0f);
+            info.motor->sendCommandMITMode(info.home_pos, 0.0f, kp_position, kd, 0.0f);
         }
         StopTripod(left_tripod, kd);
         std::this_thread::sleep_for(period);
