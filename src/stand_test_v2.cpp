@@ -12,6 +12,8 @@
 
 
 // Motors are zero'd correctly --> Moves motors to stand pose and holds it until interrupted by Ctrl-C 
+// Motors will to desired location given safe kp, kd gains, and stand angle.
+// Adding functuinality to have a smooth transition to stand pose and hold. 
 
 namespace {
 
@@ -103,28 +105,78 @@ void RunTripod(std::vector<MotorInfo>& tripod,
     }
 }
 
+// Adding trajectory-shaped that ramps from motor's actual to position to the target
+float SmoothStep (float u){
+    u = std::clamp(u, 0.0f, 1.0f);
+    return u * u * (3.0f - 2.0f * u);  // 0-->1 with zero slope at the ends
+}
+
 void MoveTripodsToOffset(std::vector<MotorInfo>& left_tripod,
                          std::vector<MotorInfo>& right_tripod,
                          float offset_rad,
-                         float kp,
-                         float kd,
-                         std::chrono::milliseconds duration) {
+                         float kp_move,
+                         float kd_move,
+                         std::chrono::milliseconds duration,
+                         float kp_hold = -1.0f,
+                         float kd_hold = -1.0f) {
     const auto period = std::chrono::milliseconds(10);
-    auto start = std::chrono::steady_clock::now();
+    const float T = std::max(0.001f, duration.count() / 1000.0f); // duration in seconds
 
-    while (std::chrono::steady_clock::now() - start < duration) {
-        for (auto& info : left_tripod) {
-            float target = info.home_pos + (SideSign(info) * offset_rad);
-            float clamped = std::clamp(target, kPMin, kPMax);
-            info.motor->sendCommandMITMode(clamped, 0.0f, kp, kd, 0.0f);
-        }
-        for (auto& info : right_tripod) {
-            float target = info.home_pos + (SideSign(info) * offset_rad);
-            float clamped = std::clamp(target, kPMin, kPMax);
-            info.motor->sendCommandMITMode(clamped, 0.0f, kp, kd, 0.0f);
-        }
-        std::this_thread::sleep_for(period);
+    // Use current position as start to avoid jump if home_pos/sign/wrap is off.
+
+    struct RampState { float p0; float p1; };
+    std::vector<RampState> L(left_tripod.size()), R(right_tripod.size());
+
+    for (size_t i = 0; i < left_tripod.size(); ++i) {
+        float p0 = left_tripod[i].motor->getPosition();
+        float p1 = left_tripod[i].home_pos + (SideSign(left_tripod[i]) * offset_rad);
+        L[i] = {p0 , std::clamp(p1, kPMin, kPMax)};
     }
+
+    for (size_t i = 0; i < right_tripod.size(); ++i) {
+        float p0 = right_tripod[i].motor->getPosition();
+        float p1 = right_tripod[i].home_pos + (SideSign(right_tripod[i]) * offset_rad);
+        R[i] = {p0 , std::clamp(p1, kPMin, kPMax)};
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    while(true){
+        float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
+        float u = t / T;
+        if (u >= 1.0f) break; // <-- move phase ends right here
+
+        float s = SmoothStep(u);
+
+        for (size_t i = 0; i < left_tripod.size(); ++i){
+            float p_cmd = L[i].p0 + s * (L[i].p1 - L[i].p0);
+            left_tripod[i].motor -> sendCommandMITMode(p_cmd, 0.0f, kp_move, kd_move, 0.0f);
+        }
+
+        for (size_t i = 0; i < right_tripod.size(); ++i){
+            float p_cmd = R[i].p0 + s * (R[i].p1 - R[i].p0);
+            right_tripod[i].motor -> sendCommandMITMode(p_cmd, 0.0f, kp_move, kd_move, 0.0f);
+        }
+        std::this_thread::sleep_for(period); // fixed-rate command streaming
+    }
+
+    // Send final target once more (still with move gains) so we land at exactly p1.
+    for (size_t i = 0; i < left_tripod.size(); ++i){
+        left_tripod[i].motor -> sendCommandMITMode(L[i].p1, 0.0f, kp_move, kd_move, 0.0f);
+    }
+    for (size_t i = 0; i < right_tripod.size(); ++i){
+        right_tripod[i].motor -> sendCommandMITMode(R[i].p1, 0.0f, kp_move, kd_move, 0.0f);
+    }
+
+    // Maybe: immediately switch to hold gains
+    if (kp_hold >= 0.0f && kd_hold >= 0.0f) {
+        for (size_t i = 0; i < left_tripod.size(); ++i){
+            left_tripod[i].motor -> sendCommandMITMode(L[i].p1, 0.0f, kp_hold, kd_hold, 0.0f);
+        }
+        for (size_t i = 0; i < right_tripod.size(); ++i){
+            right_tripod[i].motor -> sendCommandMITMode(R[i].p1, 0.0f, kp_hold, kd_hold, 0.0f);
+        }
+    }
+
 }
 
 void PrimeFeedback(const std::vector<CubemarsPi3Hat*>& motors) {
@@ -231,6 +283,7 @@ int main(int argc, char** argv) {
     //     }
     //     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     // }
+
     std::signal(SIGINT, HandleSigInt);
 
     // 1) Pre-zero readout
@@ -275,32 +328,38 @@ int main(int argc, char** argv) {
     std::cout << "Home captured." << std::endl;
 
     // 5) Move to a stand pose (need to setup a ramp later for smoothness)
-    const float kd = 2.0f;
-    const float kp_position = 2.5f;  // Position control gain for stand pose
-    const float stand_deg = -95.0f;
-    const auto stand_duration = std::chrono::seconds(10);
+    const float kd_move = 3.5f;
+    const float kp_move = 6.0f; // Damping gain for tripod
+    const float kp_hold = 5.0f; // Position control gain for stand pose
+    const float kd_hold = 1.5f;  // Damping firmer once at pose
+
+    const float stand_deg = -110.0f;
+    const auto stand_duration = std::chrono::seconds(10); // desired time to reach to pose
 
 
     // Move to a stand pose relative to captured home.
     std::cout << "Moving to stand (" << stand_deg << " deg)..." << std::endl;
     MoveTripodsToOffset(left_tripod, right_tripod, stand_deg * kDegToRad,
-                        kp_position, kd, stand_duration);
+                        kp_move, kd_move, stand_duration, kp_hold, kd_hold);
 
     std::cout << "Holding stand ... (Ctrl-C to exit)\\n";
 
+    /////// POSE ///////
     // Holding stand pose indefinitely
     while(g_run){
         for (auto&info : left_tripod) {
             float target = info.home_pos + (SideSign(info) * (stand_deg * kDegToRad));
             target = std::clamp(target, kPMin, kPMax);
-            info.motor->sendCommandMITMode(target, 0.0f, kp_position, kd, 0.0f);
+            info.motor->sendCommandMITMode(target, 0.0f, kp_hold, kd_hold, 0.0f);
         }
         for (auto&info : right_tripod) {
             float target = info.home_pos + (SideSign(info) * (stand_deg * kDegToRad));
             target = std::clamp(target, kPMin, kPMax);
-            info.motor->sendCommandMITMode(target, 0.0f, kp_position, kd, 0.0f);
+            info.motor->sendCommandMITMode(target, 0.0f, kp_hold, kd_hold, 0.0f);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // for (int k = 0; k < 10; ++k) {
+       // std::this_thread::sleep_for(std::chrono::milliseconds(1)));
     }
 
     std::cout << "Exiting stand hold..." << std::endl;
