@@ -9,6 +9,8 @@
 #include <string>
 #include <csignal>
 #include <atomic>
+#include <cstdlib>   // for std::atoi
+
 
 
 // Motors are zero'd correctly --> Moves motors to stand pose and holds it until interrupted by Ctrl-C 
@@ -23,20 +25,94 @@ struct MotorInfo {
     CubemarsPi3Hat* motor;
     bool is_left_side;  // true = left side (positive velocity, CCW), false = right side (negative velocity, CW)
     float home_pos = 0.0f;  // Home position in radians
+    float last_cmd = 0.0f; // last commanded position after clamp
+
 };
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kDegToRad = kPi / 180.0f;
+constexpr float kRadToDeg = 180.0f / kPi;
+
+static inline float RadToDeg(float radians) {
+    return radians * kRadToDeg;
+}
 constexpr float kPMin = -12.5f;
 constexpr float kPMax = 12.5f;
+// const float step_angle =  2.0f * kPi; // 360 degrees per step
+const float step_angle = 360.0f * kDegToRad;
+const auto step_duration = std::chrono::seconds(10); // 4 seconds per step | NEED TO TUNE THESE VALUES
+static float g_phase_left = 0.0f;
+static float g_phase_right = 0.0f; // start at 180 deg offset
+
+
 
 float SideSign(const MotorInfo& info) {
-    return info.is_left_side ? 1.0f : -1.0f;
+    return info.is_left_side ? -1.0f : 1.0f;
 }
 
-const float step_angle = 2.0f * kPi; // 360 degrees per step
-const auto step_duration = std::chrono::seconds(4); // 4 seconds per step | NEED TO TUNE THESE VALUES
+static bool g_debug_tripod = true;
 
+
+/////////////////////////////// debug
+
+struct CmdDiag {
+    float meas;
+    float cmd_raw;
+    float cmd;
+    bool clamped;
+    float err;
+};
+
+static inline CmdDiag ComputeDiag(const MotorInfo& info, float cmd_raw) {
+    CmdDiag d;
+    d.meas = info.motor->getPosition();
+    d.cmd_raw = cmd_raw;
+    d.cmd = std::clamp(cmd_raw, kPMin, kPMax);
+    d.clamped = (d.cmd != d.cmd_raw);
+    d.err = d.cmd - d.meas;
+    return d;
+}
+
+// Print ONCE per tripod swap: what the *first* command of the next phase will be
+static void PrintHandoffSnapshot(
+    const char* label,
+    const std::vector<MotorInfo>& active,
+    const std::vector<MotorInfo>& support,
+    float phase_start,
+    float phase_end,
+    float stand_offset_rad)
+{
+    std::cout << "\n=== HANDOFF " << label
+              << " phase_start=" << phase_start
+              << " (" << RadToDeg(phase_start) << " deg)"
+              << " phase_end=" << phase_end
+              << " (" << RadToDeg(phase_end) << " deg)"
+              << " stand=" << stand_offset_rad
+              << " (" << RadToDeg(stand_offset_rad) << " deg)"
+              << " ===\n";
+
+    auto dump = [&](const char* name, const std::vector<MotorInfo>& tri, bool is_active) {
+        std::cout << name << (is_active ? " ACTIVE\n" : " SUPPORT\n");
+        for (const auto& info : tri) {
+            float cmd_raw = is_active
+                ? (info.home_pos + SideSign(info) * 0.0f)        // first command of upcoming swing
+                : (info.home_pos + SideSign(info) * stand_offset_rad);  // support hold target
+
+            auto d = ComputeDiag(info, cmd_raw);
+
+            std::cout << "  ID " << info.id
+                      << " meas=" << d.meas
+                      << " cmd=" << d.cmd
+                      << " err=" << d.err
+                      << (d.clamped ? " [CLAMP]" : "")
+                      << "\n";
+        }
+    };
+
+    dump("support", support, false);
+    dump("active ", active,  true);
+}
+////////////////////////////////////////////////////////
 
 void CaptureHome(std::vector<MotorInfo>& tripod,
                  float kp_hold = 0.0f,
@@ -75,6 +151,8 @@ void CaptureHome(std::vector<MotorInfo>& tripod,
     for (auto& info : tripod) {
         float pos = info.motor->getPosition();
         info.home_pos = pos;
+        info.last_cmd = info.home_pos;
+
         std::cout << "ID " << info.id << " Captured home position: " << pos << " rad" << std::endl;
     }
 }
@@ -117,6 +195,29 @@ float SmoothStep (float u){
 // Global mode for signal handling
 enum class Mode {kHoldStand, kTripodWalk, kReturnHome, kHoldHome, kExit};
 static std::atomic<Mode> g_mode(Mode::kHoldStand);
+
+
+// Interactive Mode switching with cmd input thread
+static std::atomic<bool> g_input_run(true);
+
+void InputThread(){
+    std::string cmd;
+    while (g_input_run.load() && std::getline(std::cin, cmd)){
+        //trim basic whitespace 
+        cmd.erase(0, cmd.find_first_not_of(" \t\r\n"));
+        cmd.erase(cmd.find_last_not_of(" \t\r\n") + 1);
+
+        if (cmd == "stand")         g_mode.store(Mode::kHoldStand);
+        else if (cmd == "tripod")   g_mode.store(Mode::kTripodWalk);
+        else if (cmd == "home")     g_mode.store(Mode::kReturnHome);
+        else if (cmd == "holdhome") g_mode.store(Mode::kHoldHome);
+        else if (cmd == "exit")     g_mode.store(Mode::kExit);
+
+        else{
+            std::cout << "Commands: stand | tripod | home | holdhome | exit\n";
+        }
+    }
+}
 
 
 // Move both tripods to an offset from home with a smooth ramp
@@ -207,9 +308,21 @@ void AdvanceTripodPhase(std::vector<MotorInfo>& active,
                         float kp_tripod, float kd_tripod,
                         float kp_hold, float kd_hold,
                         std::chrono::milliseconds duration) {
+    // debug
+    auto last_print = std::chrono::steady_clock::now();
 
     const auto period = std::chrono::milliseconds(10);
     const float T = std::max(0.001f, duration.count() / 1000.0f); // duration in seconds
+
+    // low-noise telemetry accumulators (reset each print window)
+    int clampA = 0, clampS = 0;
+    float maxErrA = 0.0f, maxErrS = 0.0f;
+
+    // Lock support tripod to their current measured positions at phase start
+    for (auto& info : support) {
+        info.last_cmd = std::clamp(info.motor->getPosition(), kPMin, kPMax);
+    }
+
 
     auto start = std::chrono::steady_clock::now();
     while (true) {
@@ -222,25 +335,53 @@ void AdvanceTripodPhase(std::vector<MotorInfo>& active,
 
         float s = SmoothStep(u);
         float phase = phase_start + s * (phase_end - phase_start);
+        float phase_rel = phase * (phase_end - phase_start);
 
-        // Support Tripod holds stand 
-        for (auto& info: support){
-            float stand_target = info.home_pos + (SideSign(info) * stand_offset_rad);
-            stand_target = std::clamp(stand_target, kPMin, kPMax);
-            info.motor -> sendCommandMITMode(stand_target, 0.0f, kp_hold, kd_hold, 0.0f);
+        //////////// debug 
+
+        // Support tripod holds stand
+        for (auto& info : support) {
+            float cmd_raw = info.last_cmd;
+            auto d = ComputeDiag(info, cmd_raw);
+
+            if (d.clamped) clampS++;
+        
+            maxErrS = std::max(maxErrS, std::abs(d.err));
+            info.motor->sendCommandMITMode(d.cmd, 0.0f, kp_hold, kd_hold, 0.0f);
+            info.last_cmd = d.cmd;
+        }
+                // Active tripod moves through phase
+        for (auto& info : active) {
+            float cmd_raw = info.home_pos + (SideSign(info) * phase);
+            auto d = ComputeDiag(info, cmd_raw);
+
+            if (d.clamped) clampA++;
+            maxErrA = std::max(maxErrA, std::abs(d.err));
+
+            info.motor->sendCommandMITMode(d.cmd, 0.0f, kp_tripod, kd_tripod, 0.0f);
+            info.last_cmd = d.cmd;
         }
 
-        // Active Tripod moves through phase
-        for(auto&info: active){
-            float stand_target = info.home_pos + (SideSign(info) * stand_offset_rad);
-            stand_target = std::clamp(stand_target, kPMin, kPMax);
-            info.motor -> sendCommandMITMode(stand_target, 0.0f, kp_tripod, kd_tripod, 0.0f);
+        // <-- PUT PRINT+RESET HERE
+        if (g_debug_tripod) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_print >= std::chrono::milliseconds(100)) {
+                std::cout << "[TripodPhase] u=" << u
+                        << " phase=" << phase << " (" << RadToDeg(phase) << " deg)"
+                        << " maxErrA=" << maxErrA
+                        << " maxErrS=" << maxErrS
+                        << " clamps A/S=" << clampA << "/" << clampS
+                        << "\n";
+
+                last_print = now;
+                clampA = clampS = 0;
+                maxErrA = maxErrS = 0.0f;
+            }
         }
 
         if (u >= 1.0f) break;
-        std::this_thread::sleep_for(period); // fixed-rate command streaming
+        std::this_thread::sleep_for(period);
     }
-
 }
 
 
@@ -258,10 +399,42 @@ void PrimeFeedback(const std::vector<CubemarsPi3Hat*>& motors) {
 
 static void HandleSigInt(int){
     Mode m = g_mode.load();
-    if (m == Mode::kHoldStand)          g_mode.store(Mode::kReturnHome);
+    if (m == Mode::kHoldStand)          ::g_mode.store(Mode::kReturnHome);
     else if (m == Mode::kHoldHome)      g_mode.store(Mode::kExit);
     else                                g_mode.store(Mode::kExit);
 }
+
+/////////////////////////////////////////////////////// debug 
+constexpr float kTwoPi = 2.0f * kPi;
+void CarryTurnsIntoHome(std::vector<MotorInfo>& tripod, float& phase, const char* name) {
+    int carried = 0;
+
+    while (phase >= kTwoPi) {
+        for (auto& info : tripod) {
+            info.home_pos += SideSign(info) * kTwoPi;
+        }
+        phase -= kTwoPi;
+        carried++;
+    }
+
+    while (phase < 0.0f) {
+        for (auto& info : tripod) {
+            info.home_pos -= SideSign(info) * kTwoPi;
+        }
+        phase += kTwoPi;
+        carried--;
+    }
+
+    if (g_debug_tripod && carried != 0) {
+        std::cout << "[CarryTurnsIntoHome] " << name
+                  << " carried=" << carried
+                  << " new_phase=" << phase
+                  << " (" << RadToDeg(phase) << " deg)\n";
+    }
+}
+
+//////////////////////////////////////////////////////////
+
 
 }  // namespace
 
@@ -317,6 +490,7 @@ int main(int argc, char** argv) {
         {14, &motor_14, true}    // left side
     };
 
+
     // All motors for init/exit
     std::vector<CubemarsPi3Hat*> all_motors = {&motor_10, &motor_11, &motor_12,
                                                 &motor_13, &motor_14, &motor_15};
@@ -326,6 +500,7 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5)); // wait for motors to enter MIT mode
 
     std::signal(SIGINT, HandleSigInt);
+    std::thread input_thr(InputThread); // Mode switching input
 
     // 1) Pre-zero readout
     std::cout << "Pre-zero positions..." << std::endl;
@@ -378,10 +553,11 @@ int main(int argc, char** argv) {
     const float kd_sit = 5.0f; // Damping gain for returning to home
     const float kp_sit = 1.0f; // Position gain for returning to home
 
-    const float kd_tripod = 4.0f; // Damping gain for tripod gait
-    const float kp_tripod = 2.0f; // Position gain for tripod gait
+    const float kd_tripod = 1.0f; // Damping gain for tripod gait
+    const float kp_tripod = 4.5f; // Position gain for tripod gait
 
-    const float stand_deg = -110.0f;
+    // const float stand_deg = -110.0f;
+    const float stand_deg = 0.0f;
     const auto stand_duration = std::chrono::seconds(10); // desired time to reach to pose
 
     //////////// Beginning main state machine loop //////////
@@ -390,14 +566,8 @@ int main(int argc, char** argv) {
     ///////////           POSE           ////////
     /////////////////////////////////////////////
 
-    g_mode.store(Mode::kHoldStand);
-
-    std::cout << "Moving to stand (" << stand_deg << " deg)...\n";
-    MoveTripodsToOffset(left_tripod, right_tripod, stand_deg * kDegToRad,
-                    kp_move, kd_move, stand_duration, kp_hold, kd_hold);
-    std::cout << "Holding stand ... (Ctrl-C to return home)\n";
-
-
+    g_mode.store(Mode::kHoldHome);
+    std::cout << "Ready. Type: stand | tripod | home | holdhome | exit\n";
 
     while(g_mode.load() != Mode::kExit){
         Mode m = g_mode.load();
@@ -451,36 +621,59 @@ int main(int argc, char** argv) {
                 }
                 for (int k = 0; k < 10 && g_mode.load() == Mode::kHoldHome; ++k) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                } 
-                
-                std::cout << "Exiting stand hold..." << std::endl;
-
+                }  
             }
+
+
         else if (m == Mode::kTripodWalk){
             /////////////////////////////////////////////
             ///////////        TRIPOD WALK       ////////
             ///////////////////////////////////////////// 
-
-            // A = left_tripod swings, B supports, then swap
-
             std::cout << "Starting tripod walking gait..." << std::endl;
-            AdvanceTripodPhase(left_tripod, right_tripod,
-                               stand_deg * kDegToRad,
-                               0.0f, step_angle,
-                               kp_tripod, kd_tripod,
-                               kp_hold, kd_hold,
-                               step_duration);
-        }
-            if (g_mode.load() == Mode::kTripodWalk) continue;
+            
+            // A = left_tripod swings, B supports, then swap
+            while (g_mode.load() == Mode::kTripodWalk){
+                    if (g_debug_tripod) {
+                        PrintHandoffSnapshot("LEFT swing",
+                            left_tripod, right_tripod,
+                            g_phase_left, g_phase_left + step_angle,
+                            stand_deg * kDegToRad);
+                    }
 
             AdvanceTripodPhase(left_tripod, right_tripod,
                                stand_deg * kDegToRad,
-                               0.0f, step_angle,
+                               g_phase_left, g_phase_left+ step_angle,
                                kp_tripod, kd_tripod,
                                kp_hold, kd_hold,
                                step_duration);
-    }
+            g_phase_left += step_angle;
+            CarryTurnsIntoHome(left_tripod, g_phase_left, "LEFT");
         
+            if (g_mode.load() != Mode::kTripodWalk) break;
+
+            if (g_debug_tripod) {
+            PrintHandoffSnapshot("RIGHT swing",
+                right_tripod, left_tripod,
+                g_phase_right, g_phase_right + step_angle,
+                stand_deg * kDegToRad);
+            }
+
+            AdvanceTripodPhase(right_tripod, left_tripod,
+                               stand_deg * kDegToRad,
+                               g_phase_right, g_phase_right + step_angle,
+                               kp_tripod, kd_tripod,
+                               kp_hold, kd_hold,
+                               step_duration);
+            g_phase_right += step_angle;
+            CarryTurnsIntoHome(right_tripod, g_phase_right, "RIGHT");
+        }
+    }
+}
+        
+    g_input_run.store(false);  // Telling input thread to stop
+    if (input_thr.joinable()) input_thr.join(); // wait 
+
+    std::cout << "Exiting ...." << std::endl;
 
     for (auto* motor : all_motors) {
         motor->exitMITMode();

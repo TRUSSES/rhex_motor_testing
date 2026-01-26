@@ -33,11 +33,17 @@ set(PI3HAT_LIBRARY "" CACHE FILEPATH "Path to pi3hat library")
 
 add_executable(rhex_tripod_test
         # src/tripod_test.cpp #original tripod test to move legs in tripod gait
-        src/stand_sit_tripod_main.cpp #modified to add stand/sit and return home functionality
+        src/stand_sit_tripod_main_ames.cpp #modified to add stand/sit and return home functionality
         src/cubemars_pi3hat.cpp
         src/pi3hat.cpp
         #src/tripod_test_zero.cpp #for zeroing test only with tripod and return
 
+)
+
+add_executable(rhex_tripod_vel
+        src/stand_sit_tripod_vel_main_test_ames.cpp
+        src/cubemars_pi3hat.cpp
+        src/pi3hat.cpp
 )
 
 
@@ -80,6 +86,10 @@ target_include_directories(rhex_tripod_test
     PRIVATE
         include
 )
+target_include_directories(rhex_tripod_vel
+    PRIVATE
+        include
+)
 
 # target_include_directories(rhex_tripod_main
 #     PRIVATE
@@ -102,6 +112,7 @@ if(PI3HAT_INCLUDE_DIR)
     # target_include_directories(rhex_motor_testing PRIVATE "${PI3HAT_INCLUDE_DIR}")
     # target_include_directories(rhex_zero_test PRIVATE "${PI3HAT_INCLUDE_DIR}")
     target_include_directories(rhex_tripod_test PRIVATE "${PI3HAT_INCLUDE_DIR}")
+    target_include_directories(rhex_tripod_vel PRIVATE "${PI3HAT_INCLUDE_DIR}")
     # target_include_directories(rhex_tripod_main PRIVATE "${PI3HAT_INCLUDE_DIR}")
     # target_include_directories(rhex_stand_main PRIVATE "${PI3HAT_INCLUDE_DIR}")
 endif()
@@ -112,6 +123,7 @@ if(PI3HAT_LIBRARY)
     # target_link_libraries(rhex_motor_testing PRIVATE "${PI3HAT_LIBRARY}")
     # target_link_libraries(rhex_zero_test PRIVATE "${PI3HAT_LIBRARY}")
     target_link_libraries(rhex_tripod_test PRIVATE "${PI3HAT_LIBRARY}")
+    target_link_libraries(rhex_tripod_vel PRIVATE "${PI3HAT_LIBRARY}")
     # target_link_libraries(rhex_tripod_main PRIVATE "${PI3HAT_LIBRARY}")
     # target_link_libraries(rhex_stand_main PRIVATE "${PI3HAT_LIBRARY}")
 endif()
@@ -123,6 +135,7 @@ if(BCM_HOST_LIB)
     # target_link_libraries(rhex_motor_testing PRIVATE "${BCM_HOST_LIB}")
     # target_link_libraries(rhex_zero_test PRIVATE "${BCM_HOST_LIB}")
     target_link_libraries(rhex_tripod_test PRIVATE "${BCM_HOST_LIB}")
+    target_link_libraries(rhex_tripod_vel PRIVATE "${BCM_HOST_LIB}")
     # target_link_libraries(rhex_tripod_main PRIVATE "${BCM_HOST_LIB}")
     # target_link_libraries(rhex_stand_main PRIVATE "${BCM_HOST_LIB}")
 endif()
