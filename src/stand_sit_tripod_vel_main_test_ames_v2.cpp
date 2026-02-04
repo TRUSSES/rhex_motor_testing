@@ -83,21 +83,6 @@ static inline float WrapCentered(float x, float half_range) {
     return x - half_range;  // in (-half_range, +half_range]
 }
 
-// static inline float WrapToPi(float a){
-//     // wrap into (-pi, +pi)
-//     a = std::fmod(a+kPi, kTwoPi);
-//     if (a < 0.0f) a += kTwoPi;
-//     return a - kPi;
-// }
-
-static inline float wrapToPi(float a) {
-  while (a >  kPi) a -= kTwoPi;
-  while (a < -kPi) a += kTwoPi;
-  return a;
-}
-
-// call each loop
-
 // Safe Wrap jump treshold
 static inline float UpdateUnwrapRange(UnWrapState& st, float meas_rad, float half_range) {
     // meas_rad is already in [-half_range, +half_range] from the motor
@@ -112,19 +97,6 @@ static inline float UpdateUnwrapRange(UnWrapState& st, float meas_rad, float hal
     st.prev_wrapped = meas_rad;
     return st.unwrapped;
 }
-// static inline float UpdateUnwrap(UnWrapState& st, float meas_rad ) {
-//     const float w = WrapToPi(meas_rad);
-//     if (!st.init){
-//         st.init = true;
-//         st.prev_wrapped = w;
-//         st.unwrapped = w;
-//         return st.unwrapped;
-//     }
-//     const float dw = WrapToPi(w - st.prev_wrapped); // shortest step across wrap
-//     st.unwrapped += dw;
-//     st.prev_wrapped = w;
-//     return st.unwrapped;
-// }
 
 // phase logs/state vars
 static inline float WrapPhase(float phase){
@@ -169,7 +141,7 @@ void PrimeFeedback(const std::vector<CubemarsPi3Hat*>& motors) {
     for (int k = 0; k < 5; ++k) {
         for (auto* motor : motors) {
             float p = motor->getPosition();
-            motor->sendCommandMITMode(p, 0.0f, 0.0f, 0.5f, 0.0f);
+            motor->sendCommandMITMode(p, 0.0f, 0.0f, 0.6f, 0.0f);
         }
         std::this_thread::sleep_for(period);
     }
@@ -281,186 +253,61 @@ void MoveTripodsToOffset(std::vector<MotorInfo>& left_tripod,
     }
 }
 
-// Tripod velocity control
+// ---------------- Two-stroke (Buehler/RHex-style) clock ----------------
+// Parameters:
+//   tc    : total cycle period [s]
+//   ts    : duration of slow (stance) portion [s]   (0 < ts < tc)
+//   phi_s : angular sweep during slow portion [rad] (0 < phi_s < 2pi)
+// The remaining (2pi-phi_s) is completed during the fast (swing) portion.
 
-void AdvanceTripodPhaseVelocity(std::vector<MotorInfo>& active,
-                                std::vector<MotorInfo>& support,
-                                float stand_offset_rad,
-                                float phase_start,
-                                float phase_end,
-                                float kd_tripod,
-                                float kp_hold,
-                                float kd_hold,
-                                std::chrono::milliseconds duration) {
-    // debug
-    auto last_print = std::chrono::steady_clock::now();
+struct TwoStrokeClock{
+    float tc; // total period of a single leg
+    float ts; // duration of slow leg swing
+    float phi_s; // slow phase sweep (rad)
+    float phi_o; // offset between legs (rad)
 
-    // Control loop at 10ms = 100hz
-    const auto period = std::chrono::milliseconds(10);
-    const float T = std::max(0.001f, duration.count() / 1000.0f);
-    
-    // for (auto& s : support) {
-    //     const float cmd_raw = s.home_pos + SideSign(s) * stand_offset_rad;
-    //     s.hold_pos = std::clamp(cmd_raw, kPMin, kPMax);
-    // }
+    void eval(float t, float& phi_des_u, float& omega_des) const {
+        // t > 0
+        // Continous phase phi_u, and its derivative omega. 
+        // phi_u
+        const float k = std::floor(t/tc);
+        const float t_cycle = t - k * tc;
 
-    // 1) Capture a fixed hold state for stance
-    for (auto& s : support){
-        s.hold_pos = std::clamp(s.motor->getPosition(), kPMin, kPMax);
-    }
-
-    // 2) Init wrap + capture each motor's cont. pos
-    struct ActiveStart {float p0_unwrapped = 0.0f; };
-    std::vector<ActiveStart> astart(active.size());
-
-    for (size_t i = 0; i < active.size(); ++i){
-        // reset unwrap so each phase is relative to phase start
-        active[i].unwrap = UnWrapState{};
-        astart[i].p0_unwrapped = 
-            UpdateUnwrapRange(active[i].unwrap, 
-                              active[i].motor->getPosition(),
-                            kPosWrap);
-    }
-    
-    // 3) Phase profile only needs the delta
-    const float dphase = (phase_end - phase_start);
-    // Mayve velocity correction gain
-    const float kVelP = 0.1f; // rads/s per rad
-
-
-    // 4) Start loop phase
-    auto start = std::chrono::steady_clock::now();
-    while (true) {
-        Mode m = g_mode.load();
-        // Exit command
-        if (m == Mode::kExit || m == Mode::kReturnHome) return;
-
-        float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
-        float u = t / T;
-        if (u >= 1.0f) u = 1.0f;
-
-        const float s = SmoothStep(u);
-        const float sdot = SmoothStepDeriv(u) / T;
-
-        // Progress within this step
-        const float phase_prog = s * dphase;
-        const float phase_dot = dphase * sdot;
-
-        // ---- DEBUG GATE (prints once per 100ms) ----
-        const auto now = std::chrono::steady_clock::now();
-        const bool do_print = g_debug_tripod && (now - last_print >= std::chrono::milliseconds(100));
-        
-
-        // float phase = phase_start + s * (phase_end - phase_start);
-        // float phase_dot = (phase_end - phase_start) * SmoothStepDeriv(u) / T;
-        // float vel_cmd = std::clamp(phase_dot, -kVelMax, kVelMax);
-
-        // --- SUPPORT: hold stance targets (fixed) ---
-        int clampS = 0;
-        for (auto& sleg: support){
-            float cmd = std::clamp(sleg.hold_pos, kPMin, kPMax);
-            if (cmd != sleg.hold_pos) clampS++;
-            sleg.motor->sendCommandMITMode(cmd, 0.0f, kp_hold, kd_hold, 0.0f);
-        }
-        // --- ACTIVE: velocity execution with unwrap-based “go to +360deg” target ---
-        for (size_t i=0; i < active.size(); i++){
-            auto& aleg = active[i];
-            // desired cont pos for this phase
-            const float sign = SideSign(aleg);
-        
-            // // continous measured pos
-            // const float p_meas = aleg.motor->getPosition();
-            // const float p_meas_u = UpdateUnwrapRange(aleg.unwrap, p_meas, kPosWrap);
-
-            // const float p_des_u = astart[i].p0_unwrapped + sign * phase_prog;
-
-            // // feedforward vel + small corrections to actually land 
-            // float v_cmd = sign * phase_dot + kVelP * (p_des_u - p_meas_u);
-            // v_cmd = std::clamp(v_cmd, -kVelMax, kVelMax);
-            // const float p_safe = std::clamp(p_meas, kPMin, kPMax);
-
-            // //////////////////////////////////
-
-            // // p_des must be in range even if kp = 0
-            // // Sending commands to robot
-            // aleg.motor->sendCommandMITMode(p_safe, v_cmd, 0.0f, kd_tripod, 0.0f);
-            // --- measure continuous position ---
-
-            // continuous measured position (correct unwrap on ±12.5)
-            const float p_meas   = aleg.motor->getPosition();
-            const float p_meas_u = UpdateUnwrapRange(aleg.unwrap, p_meas, kPosWrap);
-
-            // desired continuous position
-            const float p_des_u = astart[i].p0_unwrapped + sign * phase_prog;
-
-            // leg-phase coords for wrapped error
-            const float e_phase = p_des_u - p_meas_u;
-            const float kp_u = 2.0f;
-            float v_cmd = sign * phase_dot + kp_u * e_phase;
-            // safety
-            // if (std::fabs(meas_phase) > 0.8f) {
-            //     g_mode.store(Mode::kHoldStand);
-            //     return;
-            // }
-
-            // velocity command
-            // const float v_ff_leg = phase_dot;
-            // const float kp_vel = 0.5f;
-            // const float kd_vel = 0.0f;
-
-            const float v_meas_motor = aleg.motor->getVelocity();   // only if available
-            // const float v_meas_leg   = v_meas_motor / sign;
-
-            // float v_cmd_leg = v_ff_leg + kp_vel * e + kd_vel * (v_ff_leg - v_meas_leg);
-            // float v_cmd_motor = sign * v_cmd_leg;
-            v_cmd = std::clamp(v_cmd, -kVelMax, kVelMax);
-
-                if (do_print) {
-                std::cout
-                    << "  [A] ID " << aleg.id
-                    << " p=" << p_meas
-                    << " pu=" << p_meas_u
-                    << " e=" << e_phase
-                    << " vcmd=" << v_cmd
-                    << " vmeas=" << v_meas_motor
-                    << "\n";
-                 }
-
-            const float p_safe = std::clamp(p_meas, kPMin, kPMax);
-            aleg.motor->sendCommandMITMode(p_safe, v_cmd, 0.0f, kd_tripod, 0.0f);
-
-            
-    }      
-    if (g_debug_tripod) {
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_print >= std::chrono::milliseconds(100)) {
-            std::cout << "[TripodPhaseVel] u=" << u
-                        << " phase_prog=" << phase_prog
-                        << " vel_ff=" << phase_dot
-                        << " clampS=" << clampS
-                        << "\n";
-            last_print = now;
+        if (t_cycle < ts){ // slow phase
+            omega_des = phi_s / std::max(1e-6f, ts);
+            phi_des_u = phi_o + kTwoPi * k + omega_des * t_cycle;
+        } else { // fast phase
+            const float tf = std::max(1e-6f, tc-ts);
+            const float omega_fast = (kTwoPi - phi_s) / (tc - tf);
+            omega_des = omega_fast;
+            phi_des_u = phi_o + kTwoPi * k + phi_s + omega_fast * (t_cycle - ts);
         }
     }
+};
 
-    if (u >= 1.0f) break;
-    std::this_thread::sleep_for(period);
-    }
+// Run continous two-stroke tripod gait using velocity commands + unwrap phase tracking.
+// Tripod B is time-shifted by tc/2 (180 deg out of phase in time).
+void RunTwoStrokeTripod(std::vector<MotorInfo>& tripodA,
+                        std::vector<MotorInfo>& tripodB,
+                        const TwoStrokeClock& clock,
+                        float kd_tripod,
+                        float k_phase_vel,
+                        float vel_limit,
+                        bool debug_print = true){
+// Control loop at 10ms = 100hz
+const auto period = std::chrono::milliseconds(10);
 
-    // Stop active tripod but safe pos
-    for (auto& aleg : active) {
-        const float p_safe = std::clamp(aleg.motor->getPosition(), kPMin, kPMax);
-        aleg.motor->sendCommandMITMode(p_safe, 0.0f, 0.0f, kd_tripod, 0.0f);
-    }
-    // // Hold support tripod at stand offset relative to its captured home_pos
-    // for (auto& sleg : support) {
-    //     // const float cmd_raw = sleg.home_pos + SideSign(sleg) * stand_offset_rad;
-    //     // float cmd = sleg.home_pos + SideSign(sleg) * stand_offset_rad;
-    //     const float cmd = std::clamp(sleg.hold_pos, kPMin, kPMax);
-    //     sleg.motor->sendCommandMITMode(cmd, 0.0f, kp_hold, kd_hold, 0.0f);
-    // }
+// init gait + capture starting position for each motor ONCE.
 
+for (auto& leg: tripodA){
+    leg.unwrap = UnWrapState{};
+    leg.p0_unwrapped = get.UpdateUnwrapRange(leg.unwrap, leg.motor->getPosition(), kPosWrap);
 }
+
+
+                        
+
+
 
 }  // namespace
 

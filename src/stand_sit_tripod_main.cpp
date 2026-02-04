@@ -337,7 +337,7 @@ void AdvanceTripodPhase(std::vector<MotorInfo>& active,
         float phase = phase_start + s * (phase_end - phase_start);
         float phase_rel = phase * (phase_end - phase_start);
 
-        //////////// debug 
+        //////////// debug ////////////
 
         // Support tripod holds stand
         for (auto& info : support) {

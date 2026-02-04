@@ -33,6 +33,7 @@ set(PI3HAT_LIBRARY "" CACHE FILEPATH "Path to pi3hat library")
 
 add_executable(rhex_tripod_test
         # src/tripod_test.cpp #original tripod test to move legs in tripod gait
+        # src/stand_sit_tripod_vel_main_test.cpp
         src/stand_sit_tripod_main_ames.cpp #modified to add stand/sit and return home functionality
         src/cubemars_pi3hat.cpp
         src/pi3hat.cpp
@@ -41,11 +42,16 @@ add_executable(rhex_tripod_test
 )
 
 add_executable(rhex_tripod_vel
-        src/stand_sit_tripod_vel_main_test_ames.cpp
+        src/stand_sit_tripod_vel_main_test.cpp
         src/cubemars_pi3hat.cpp
         src/pi3hat.cpp
 )
 
+add_executable(rhex_tripod_vel_ames
+        src/stand_sit_tripod_vel_main_test_ames.cpp
+        src/cubemars_pi3hat.cpp
+        src/pi3hat.cpp
+)
 
 #### MAIN CODE #### 
 
@@ -66,6 +72,19 @@ add_executable(rhex_stand_sit_test
         src/cubemars_pi3hat.cpp
         src/pi3hat.cpp
 )
+
+add_executable(rhex_stand_sit_belly_test
+        src/stand_sit_belly_main.cpp
+        src/cubemars_pi3hat.cpp
+        src/pi3hat.cpp
+
+)
+
+add_executable(rhex_stand_sit_belly_tripod_test
+        src/stand_sit_belly_main_tripod.cpp
+        src/cubemars_pi3hat.cpp
+        src/pi3hat.cpp
+)   
 
 # target_include_directories(rhex_motor_testing
 #     PRIVATE
@@ -105,6 +124,22 @@ target_include_directories(rhex_stand_sit_test
         include
 )
 
+target_include_directories(rhex_tripod_vel_ames
+    PRIVATE
+        include
+)
+target_include_directories(rhex_stand_sit_belly_test
+    PRIVATE
+        include
+)
+
+target_include_directories(rhex_stand_sit_belly_tripod_test
+    PRIVATE
+        include
+)
+
+
+
 
 if(PI3HAT_INCLUDE_DIR)
     # target_include_directories(rhex_stand_test PRIVATE "${PI3HAT_INCLUDE_DIR}")
@@ -113,8 +148,11 @@ if(PI3HAT_INCLUDE_DIR)
     # target_include_directories(rhex_zero_test PRIVATE "${PI3HAT_INCLUDE_DIR}")
     target_include_directories(rhex_tripod_test PRIVATE "${PI3HAT_INCLUDE_DIR}")
     target_include_directories(rhex_tripod_vel PRIVATE "${PI3HAT_INCLUDE_DIR}")
+    target_include_directories(rhex_tripod_vel_ames PRIVATE "${PI3HAT_INCLUDE_DIR}")
     # target_include_directories(rhex_tripod_main PRIVATE "${PI3HAT_INCLUDE_DIR}")
     # target_include_directories(rhex_stand_main PRIVATE "${PI3HAT_INCLUDE_DIR}")
+    target_include_directories((rhex_stand_sit_belly_test PRIVATE "${PI3HAT_INCLUDE_DIR}"))
+    target_include_directories((rhex_stand_sit_belly_tripod_test PRIVATE "${PI3HAT_INCLUDE_DIR}"))
 endif()
 
 if(PI3HAT_LIBRARY)
@@ -124,8 +162,12 @@ if(PI3HAT_LIBRARY)
     # target_link_libraries(rhex_zero_test PRIVATE "${PI3HAT_LIBRARY}")
     target_link_libraries(rhex_tripod_test PRIVATE "${PI3HAT_LIBRARY}")
     target_link_libraries(rhex_tripod_vel PRIVATE "${PI3HAT_LIBRARY}")
+    target_link_libraries(rhex_tripod_vel_ames PRIVATE "${PI3HAT_LIBRARY}")
     # target_link_libraries(rhex_tripod_main PRIVATE "${PI3HAT_LIBRARY}")
     # target_link_libraries(rhex_stand_main PRIVATE "${PI3HAT_LIBRARY}")
+    target_link_libraries(rhex_stand_sit_belly_test PRIVATE "${PI3HAT_LIBARARY}")
+    target_link_libraries(rhex_stand_sit_belly_tripod_test PRIVATE "${PI3HAT_LIBARARY}")
+
 endif()
 
 find_library(BCM_HOST_LIB bcm_host)
@@ -136,6 +178,10 @@ if(BCM_HOST_LIB)
     # target_link_libraries(rhex_zero_test PRIVATE "${BCM_HOST_LIB}")
     target_link_libraries(rhex_tripod_test PRIVATE "${BCM_HOST_LIB}")
     target_link_libraries(rhex_tripod_vel PRIVATE "${BCM_HOST_LIB}")
+    target_link_libraries(rhex_tripod_vel_ames PRIVATE "${BCM_HOST_LIB}")
     # target_link_libraries(rhex_tripod_main PRIVATE "${BCM_HOST_LIB}")
     # target_link_libraries(rhex_stand_main PRIVATE "${BCM_HOST_LIB}")
+    target_link_libraries(rhex_stand_sit_belly_test PRIVATE "${BCM_HOST_LIB}")
+    target_link_libraries(rhex_stand_sit_belly_tripod_test PRIVATE "${BCM_HOST_LIB}")
+
 endif()
