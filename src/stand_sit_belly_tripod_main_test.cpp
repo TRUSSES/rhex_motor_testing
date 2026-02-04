@@ -13,6 +13,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+// Uses velocity control to execute motors, and are tuned with keyboard inputs (W/S) to increase/decrease velocity.
+// Tripod gait with belly motors only.
+
 
 // Motors are zero'd correctly --> Moves motors to stand pose and holds it until interrupted by Ctrl-C 
 // Motors will to desired location given safe kp, kd gains, and stand angle.

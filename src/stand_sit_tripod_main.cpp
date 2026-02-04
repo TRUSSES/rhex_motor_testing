@@ -11,7 +11,8 @@
 #include <atomic>
 #include <cstdlib>   // for std::atoi
 
-
+// WIP with implementation of wrap around logic
+// Continuation of stand_sit_main.cpp file, now implementing tripod gait with position control. 
 
 // Motors are zero'd correctly --> Moves motors to stand pose and holds it until interrupted by Ctrl-C 
 // Motors will to desired location given safe kp, kd gains, and stand angle.

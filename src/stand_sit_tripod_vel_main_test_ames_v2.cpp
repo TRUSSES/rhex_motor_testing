@@ -11,6 +11,11 @@
 #include <vector>
 #include <csignal>
 
+
+// Stand sit tripod velocity control test with Ames testing gains.
+// Includes wrap around logic for multi-turn rotation.
+// Implementing a simple tripod gait with velocity control, mimicing a beuhler clock.
+
 // Tripod gait planner (phase) with velocity execution to allow multi-turn rotation.
 
 namespace {
@@ -253,6 +258,133 @@ void MoveTripodsToOffset(std::vector<MotorInfo>& left_tripod,
     }
 }
 
+// Tripod velocity control
+void AdvanceTripodPhaseVelocity(std::vector<MotorInfo>& active,
+                                std::vector<MotorInfo>& support,
+                                float stand_offset_rad,
+                                float phase_start,
+                                float phase_end,
+                                float kd_tripod,
+                                float kp_hold,
+                                float kd_hold,
+                                std::chrono::milliseconds duration) {
+    // debug
+    auto last_print = std::chrono::steady_clock::now();
+
+    // Control loop at 10ms = 100hz
+    const auto period = std::chrono::milliseconds(10);
+    const float T = std::max(0.001f, duration.count() / 1000.0f);
+
+    // 1) Capture a fixed hold state for stance
+    for (auto& s : support) {
+        s.hold_pos = std::clamp(s.motor->getPosition(), kPMin, kPMax);
+    }
+
+    // 2) Init wrap + capture each motor's cont. pos
+    struct ActiveStart { float p0_unwrapped = 0.0f; };
+    std::vector<ActiveStart> astart(active.size());
+
+    for (size_t i = 0; i < active.size(); ++i) {
+        // reset unwrap so each phase is relative to phase start
+        active[i].unwrap = UnWrapState{};
+        astart[i].p0_unwrapped =
+            UpdateUnwrapRange(active[i].unwrap,
+                              active[i].motor->getPosition(),
+                              kPosWrap);
+    }
+
+    // 3) Phase profile only needs the delta
+    const float dphase = (phase_end - phase_start);
+
+    // 4) Start loop phase
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        Mode m = g_mode.load();
+        // Exit command
+        if (m == Mode::kExit || m == Mode::kReturnHome) return;
+
+        float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
+        float u = t / T;
+        if (u >= 1.0f) u = 1.0f;
+
+        const float s = SmoothStep(u);
+        const float sdot = SmoothStepDeriv(u) / T;
+
+        // Progress within this step
+        const float phase_prog = s * dphase;
+        const float phase_dot = dphase * sdot;
+
+        // ---- DEBUG GATE (prints once per 100ms) ----
+        const auto now = std::chrono::steady_clock::now();
+        const bool do_print = g_debug_tripod && (now - last_print >= std::chrono::milliseconds(100));
+
+        // --- SUPPORT: hold stance targets (fixed) ---
+        int clampS = 0;
+        for (auto& sleg : support) {
+            float cmd = std::clamp(sleg.hold_pos, kPMin, kPMax);
+            if (cmd != sleg.hold_pos) clampS++;
+            sleg.motor->sendCommandMITMode(cmd, 0.0f, kp_hold, kd_hold, 0.0f);
+        }
+
+        // --- ACTIVE: velocity execution with unwrap-based “go to +360deg” target ---
+        for (size_t i = 0; i < active.size(); i++) {
+            auto& aleg = active[i];
+            // desired cont pos for this phase
+            const float sign = SideSign(aleg);
+
+            // continuous measured position (correct unwrap on ±12.5)
+            const float p_meas = aleg.motor->getPosition();
+            const float p_meas_u = UpdateUnwrapRange(aleg.unwrap, p_meas, kPosWrap);
+
+            // desired continuous position
+            const float p_des_u = astart[i].p0_unwrapped + sign * phase_prog;
+
+            // leg-phase coords for wrapped error
+            const float e_phase = p_des_u - p_meas_u;
+            const float kp_u = 2.0f;
+            float v_cmd = sign * phase_dot + kp_u * e_phase;
+
+            const float v_meas_motor = aleg.motor->getVelocity();   // only if available
+            v_cmd = std::clamp(v_cmd, -kVelMax, kVelMax);
+
+            if (do_print) {
+                std::cout
+                    << "  [A] ID " << aleg.id
+                    << " p=" << p_meas
+                    << " pu=" << p_meas_u
+                    << " e=" << e_phase
+                    << " vcmd=" << v_cmd
+                    << " vmeas=" << v_meas_motor
+                    << "\n";
+            }
+
+            const float p_safe = std::clamp(p_meas, kPMin, kPMax);
+            aleg.motor->sendCommandMITMode(p_safe, v_cmd, 0.0f, kd_tripod, 0.0f);
+        }
+
+        if (g_debug_tripod) {
+            auto now2 = std::chrono::steady_clock::now();
+            if (now2 - last_print >= std::chrono::milliseconds(100)) {
+                std::cout << "[TripodPhaseVel] u=" << u
+                          << " phase_prog=" << phase_prog
+                          << " vel_ff=" << phase_dot
+                          << " clampS=" << clampS
+                          << "\n";
+                last_print = now2;
+            }
+        }
+
+        if (u >= 1.0f) break;
+        std::this_thread::sleep_for(period);
+    }
+
+    // Stop active tripod but safe pos
+    for (auto& aleg : active) {
+        const float p_safe = std::clamp(aleg.motor->getPosition(), kPMin, kPMax);
+        aleg.motor->sendCommandMITMode(p_safe, 0.0f, 0.0f, kd_tripod, 0.0f);
+    }
+}
+
 // ---------------- Two-stroke (Buehler/RHex-style) clock ----------------
 // Parameters:
 //   tc    : total cycle period [s]
@@ -294,20 +426,27 @@ void RunTwoStrokeTripod(std::vector<MotorInfo>& tripodA,
                         float k_phase_vel,
                         float vel_limit,
                         bool debug_print = true){
-// Control loop at 10ms = 100hz
-const auto period = std::chrono::milliseconds(10);
+    // Control loop at 10ms = 100hz
+    const auto period = std::chrono::milliseconds(10);
 
-// init gait + capture starting position for each motor ONCE.
+    // init gait + capture starting position for each motor ONCE.
+    for (auto& leg : tripodA) {
+        leg.unwrap = UnWrapState{};
+        leg.p0_unwrapped = UpdateUnwrapRange(leg.unwrap, leg.motor->getPosition(), kPosWrap);
+    }
+    for (auto& leg : tripodB) {
+        leg.unwrap = UnWrapState{};
+        leg.p0_unwrapped = UpdateUnwrapRange(leg.unwrap, leg.motor->getPosition(), kPosWrap);
+    }
 
-for (auto& leg: tripodA){
-    leg.unwrap = UnWrapState{};
-    leg.p0_unwrapped = get.UpdateUnwrapRange(leg.unwrap, leg.motor->getPosition(), kPosWrap);
+    // TODO: implement full two-stroke gait loop.
+    static_cast<void>(clock);
+    static_cast<void>(kd_tripod);
+    static_cast<void>(k_phase_vel);
+    static_cast<void>(vel_limit);
+    static_cast<void>(debug_print);
+    static_cast<void>(period);
 }
-
-
-                        
-
-
 
 }  // namespace
 

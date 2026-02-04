@@ -10,6 +10,7 @@
 #include <csignal>
 #include <atomic>
 
+// Original stand_sit_main.cpp file, backbone to the continuation of belly, and tripod gait testing. //
 
 // Motors are zero'd correctly --> Moves motors to stand pose and holds it until interrupted by Ctrl-C 
 // Motors will to desired location given safe kp, kd gains, and stand angle.
